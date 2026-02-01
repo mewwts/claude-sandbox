@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""
+Claude Hooks Server
+
+Listens on a unix socket for JSON hook events from Claude Code and sends
+desktop notifications with sound. Started automatically by claude-sandbox.
+
+Usage:
+  ./claude-hooks-server                         # Default socket
+  ./claude-hooks-server --socket /path/to.sock  # Custom socket
+"""
+
+import argparse
+import json
+import logging
+import os
+import subprocess
+from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+from socketserver import UnixStreamServer
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[claude-hooks-server] %(levelname)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+DEFAULT_SOCKET_PATH = Path.home() / ".claude-sandbox" / "claude-hooks.sock"
+
+
+def notify(title: str, message: str, sound: str = "Blow"):
+    """Send a macOS desktop notification with sound."""
+    script = f'display notification {json.dumps(message)} with title {json.dumps(title)} sound name {json.dumps(sound)}'
+    try:
+        subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        logger.warning("Failed to send notification: %s", e)
+
+
+def project_label(event: dict) -> str:
+    """Extract a short project label from the event for notification titles."""
+    # Prefer CLAUDE_PROJECT_DIR passed by hook.sh, fall back to cwd from claude
+    project = event.get("project") or event.get("hook_payload", {}).get("cwd", "")
+    if project:
+        return os.path.basename(project)
+    return event.get("hook_payload", {}).get("session_id", "")[:8]
+
+
+def handle_event(event: dict):
+    """Process a hook event and send appropriate notification.
+
+    The hook.sh wrapper sends: {time, pid, uuid, project, hook_payload: <claude event>}
+    The claude event has: {hook_event_name, session_id, cwd, ...}
+    """
+    payload = event.get("hook_payload", event)
+    event_name = payload.get("hook_event_name", "")
+    label = project_label(event)
+
+    if event_name == "Notification":
+        notify(
+            f"Claude [{label}]",
+            payload.get("message", "Notification"),
+        )
+    elif event_name == "Stop":
+        notify(
+            f"Claude [{label}]",
+            "Waiting for input",
+            sound="Blow",
+        )
+
+
+class HookHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        logger.info("%s", args[0])
+
+    def log_error(self, format, *args):
+        logger.error(format, *args)
+
+    def do_POST(self):
+        content_length = int(self.headers.get("Content-Length", 0))
+        data = self.rfile.read(content_length)
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse JSON: %s", e)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(e)}).encode())
+            return
+        logger.info("Event: %s", json.dumps(event, default=str))
+        handle_event(event)
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+
+class UnixHTTPServer(UnixStreamServer):
+    allow_reuse_address = True
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        return request, ("", 0)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Claude Hooks Server")
+    parser.add_argument("--socket", type=Path, default=DEFAULT_SOCKET_PATH)
+    args = parser.parse_args()
+
+    socket_path = args.socket
+    if socket_path.exists():
+        socket_path.unlink()
+
+    httpd = UnixHTTPServer(str(socket_path), HookHandler)
+    os.chmod(str(socket_path), 0o666)
+
+    logger.info("Listening on unix:%s", socket_path)
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+        httpd.shutdown()
+        socket_path.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,26 @@
+# Claude Code sandbox settings
+# These settings are applied via --set when creating VMs
+
+minimumLimaVersion: 2.0.0
+
+base:
+- template:default
+
+# Claude-specific provisioning
+provision:
+  # Claude Code CLI (user)
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eux
+
+      # Ensure ~/.local/bin is in PATH (for login shells via .profile)
+      if ! grep -q 'local/bin' ~/.profile 2>/dev/null; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile
+      fi
+      export PATH="$HOME/.local/bin:$PATH"
+
+      # Install Claude Code CLI
+      if ! command -v claude &> /dev/null; then
+        curl -fsSL https://claude.ai/install.sh | bash
+      fi

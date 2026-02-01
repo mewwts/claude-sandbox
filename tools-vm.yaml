@@ -1,0 +1,196 @@
+# Lima VM configuration for development tools
+# Usage: limactl create --name=my-tools-vm tools-vm.yaml
+# Then use with: ./claude-sandbox --clone-from my-tools-vm
+
+# Ubuntu 24.04 LTS - stable, well-supported
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+# VM Resources
+cpus: 11
+memory: "40GiB"
+disk: "100GiB"
+
+# Use VZ (Apple Virtualization.framework) for faster startup than QEMU
+vmType: "vz"
+
+# Disable audio and video for headless operation (faster startup)
+audio:
+  device: null
+video:
+  display: "none"
+
+# Mounts configured dynamically by claude-sandbox script at clone time
+mounts: []
+
+# Use virtiofs for fast, writable mounts
+mountType: "virtiofs"
+
+# VZ virtualization options (macOS only)
+vmOpts:
+  vz:
+    # Rosetta for x86_64 emulation on Apple Silicon
+    rosetta:
+      enabled: true
+      binfmt: true
+
+# Cloud-init provisioning (runs only once during initial VM creation)
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      STAMP="/var/lib/claude-sandbox-provisioned"
+      if [ -f "$STAMP" ]; then exit 0; fi
+
+      # Update system
+      apt-get update
+      apt-get upgrade -y
+
+      # Install common tools and build essentials
+      apt-get install -y \
+        git \
+        curl \
+        wget \
+        jq \
+        ripgrep \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        ca-certificates \
+        gnupg \
+        unzip \
+        zip \
+        htop \
+        tree \
+        tmux
+
+      # Install clang and LLVM (C/C++)
+      apt-get install -y clang llvm cmake
+
+      # Install Python and pip
+      apt-get install -y python3 python3-pip python3-venv
+
+      # Install Go (latest stable from golang.org)
+      GO_VERSION="1.22.5"
+      ARCH=$(dpkg --print-architecture)
+      if [ "$ARCH" = "arm64" ]; then
+        GO_ARCH="arm64"
+      else
+        GO_ARCH="amd64"
+      fi
+      wget -q "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" -O /tmp/go.tar.gz
+      rm -rf /usr/local/go
+      tar -C /usr/local -xzf /tmp/go.tar.gz
+      rm /tmp/go.tar.gz
+
+      # Add Go to system-wide PATH
+      cat > /etc/profile.d/go.sh << 'GOEOF'
+      export PATH=$PATH:/usr/local/go/bin
+      export GOPATH=$HOME/go
+      export PATH=$PATH:$GOPATH/bin
+      GOEOF
+
+      # Install Docker Engine
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+      apt-get update
+      apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+      # Add default Lima user to docker group
+      usermod -aG docker "{{.User}}"
+
+      touch "$STAMP"
+
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -u
+      STAMP="$HOME/.claude-sandbox-tools-provisioned"
+      if [ -f "$STAMP" ]; then exit 0; fi
+
+      # Source Go environment
+      export PATH=$PATH:/usr/local/go/bin
+      export GOPATH=$HOME/go
+      export PATH=$PATH:$GOPATH/bin
+
+      # Install Rust via rustup
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      . "$HOME/.cargo/env"
+
+      # Install rust-analyzer
+      rustup component add rust-analyzer
+
+      # Install gopls (Go language server)
+      go install golang.org/x/tools/gopls@latest
+
+      # Install uv (fast Python package manager)
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      # Install fnm (Fast Node Manager)
+      curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$HOME/.local/share/fnm" --skip-shell
+      export PATH="$HOME/.local/share/fnm:$PATH"
+      # Disable set -u temporarily for fnm env (it may reference unset variables)
+      set +u
+      eval "$("$HOME/.local/share/fnm/fnm" env --shell bash)"
+      set -u
+
+      # Install latest LTS Node.js
+      "$HOME/.local/share/fnm/fnm" install --lts
+      "$HOME/.local/share/fnm/fnm" default lts-latest
+      set +u
+      eval "$("$HOME/.local/share/fnm/fnm" env --shell bash)"
+      set -u
+
+      # Install TypeScript and ts-node
+      npm install -g typescript ts-node
+
+      # Install Claude Code (native binary)
+      curl -fsSL https://claude.ai/install.sh | bash
+
+      # Install SDKMAN for JVM tools
+      export SDKMAN_DIR="$HOME/.sdkman"
+      curl -s "https://get.sdkman.io?rcupdate=false" | bash
+
+      # Source SDKMAN and install JVM tools (disable set -u as SDKMAN uses many optional variables)
+      set +u
+      if [ -f "$HOME/.sdkman/bin/sdkman-init.sh" ]; then
+        . "$HOME/.sdkman/bin/sdkman-init.sh"
+        yes | sdk install java 21.0.9-tem
+        yes | sdk install kotlin
+        yes | sdk install scala
+        yes | sdk install maven
+        yes | sdk install gradle
+        yes | sdk install sbt
+      fi
+      set -u
+
+      # Configure Docker CLI plugins
+      mkdir -p "$HOME/.docker"
+      cat > "$HOME/.docker/config.json" << 'DOCKER_EOF'
+      {
+        "cliPluginsExtraDirs": ["/usr/libexec/docker/cli-plugins"]
+      }
+      DOCKER_EOF
+
+      # Add shell configuration to .profile (not .bashrc, which has an early-exit for non-interactive shells)
+      cat >> "$HOME/.profile" << 'PROFILE_EOF'
+
+      # fnm (Node.js)
+      export PATH="$HOME/.local/share/fnm:$PATH"
+      eval "$(fnm env)"
+
+      # Cargo/Rust
+      . "$HOME/.cargo/env"
+
+      # SDKMAN
+      export SDKMAN_DIR="$HOME/.sdkman"
+      [[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "$HOME/.sdkman/bin/sdkman-init.sh"
+      PROFILE_EOF
+
+      touch "$STAMP"

@@ -10,9 +10,9 @@ images:
     arch: "aarch64"
 
 # VM Resources
-cpus: 11
-memory: "40GiB"
-disk: "100GiB"
+cpus: 4
+memory: "8GiB"
+disk: "40GiB"
 
 # Use VZ (Apple Virtualization.framework) for faster startup than QEMU
 vmType: "vz"
